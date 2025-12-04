@@ -1,8 +1,6 @@
 streamlit==1.29.0
 streamlit-drawable-canvas==0.9.3
-mediapipe>=0.10,<0.12
-opencv-contrib-python-headless
+opencv-python-headless
+numpy
 pandas
-numpy<2.0
 Pillow
-protobuf<5
