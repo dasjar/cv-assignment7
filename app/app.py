@@ -295,21 +295,31 @@ def safe_display_image(bgr_img, caption=""):
 with tab_pose:
     st.title("Real-Time Pose and Hand Tracking (MediaPipe)")
 
+    # ---- Limits to keep cloud hosting stable ----
+    MAX_PROCESSED_FRAMES = 300      # hard cap on how many frames we run MediaPipe on
+    FRAME_STEP = 2                  # process every 2nd frame in the video
+    MAX_PREVIEW_FRAMES = 30         # at most 30 thumbnails stored in memory
+
     # ---- Session state for logs ----
     if "pose_hand_log" not in st.session_state:
         st.session_state.pose_hand_log = []
     if "pose_frame_counter" not in st.session_state:
         st.session_state.pose_frame_counter = 0
     if "pose_preview_frames" not in st.session_state:
-        st.session_state.pose_preview_frames = []   # stores sampled annotated frames
+        st.session_state.pose_preview_frames = []   # sampled annotated frames
 
     st.markdown(
         """
 This tab performs **pose estimation** + **hand tracking** using MediaPipe.
 All detected landmarks are logged to a CSV file.
 
-**NEW:** When processing a video, the app now displays **every 10th frame**
-as a mini “video playback” gallery.
+To make the deployed app stable on a small cloud instance, we:
+
+- Process at most **300 frames** per uploaded video  
+- Run MediaPipe on **every 2nd frame**  
+- Store at most **30 preview frames** for the gallery  
+
+Locally (on the cluster) you can process full videos without these limits.
         """
     )
 
@@ -323,7 +333,7 @@ as a mini “video playback” gallery.
     # MODE 1 — Webcam snapshot
     # ----------------------------------------------------------
     if mode == "Webcam snapshot (browser)":
-        st.info("Capture webcam snapshots. Each frame is logged.")
+        st.info("Capture webcam snapshots. Each frame is processed and logged.")
 
         cam_image = st.camera_input("Capture a frame")
 
@@ -343,13 +353,23 @@ as a mini “video playback” gallery.
     # MODE 2 — Upload video
     # ----------------------------------------------------------
     else:
-        st.info("Upload a video. Every frame is logged. Every 10th frame is displayed.")
+        st.info(
+            "Upload a short video. We process up to 300 frames "
+            "(every 2nd frame) and log all landmarks."
+        )
 
         video_file = st.file_uploader(
             "Upload a video file", type=["mp4", "mov", "avi", "mkv"]
         )
 
         if video_file is not None:
+            # optional guard: warn if file is very large
+            if video_file.size > 80 * 1024 * 1024:  # 80 MB
+                st.warning(
+                    "Large video detected (>80 MB). For the online demo, "
+                    "please prefer short clips (5–10 seconds, 720p or lower) "
+                    "to avoid timeouts."
+                )
 
             tmp_video_path = Path(ROOT_DIR) / "tmp_pose_video.mp4"
             with open(tmp_video_path, "wb") as f:
@@ -359,55 +379,74 @@ as a mini “video playback” gallery.
                 cap = cv2.VideoCapture(str(tmp_video_path))
                 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
 
-                frame_idx = 0
+                raw_frame_idx = 0         # counts every frame read from video
+                processed_frames = 0      # counts frames that actually run through MediaPipe
                 progress = st.progress(0.0)
                 last_annotated = None
-                st.session_state.pose_preview_frames = []   # RESET gallery
+                st.session_state.pose_preview_frames = []   # reset gallery
 
                 while True:
                     ret, frame_bgr = cap.read()
                     if not ret:
                         break
 
-                    frame_idx += 1
+                    raw_frame_idx += 1
+
+                    # Skip frames to reduce load
+                    if raw_frame_idx % FRAME_STEP != 0:
+                        continue
+
+                    processed_frames += 1
+                    if processed_frames > MAX_PROCESSED_FRAMES:
+                        # stop once we hit our processing cap
+                        break
+
                     st.session_state.pose_frame_counter += 1
                     global_idx = st.session_state.pose_frame_counter
 
-                    # process with mediapipe
+                    # Run MediaPipe pose + hands on this frame
                     annotated_bgr, rows = analyze_frame_pose_and_hands(
                         frame_bgr, global_idx
                     )
                     st.session_state.pose_hand_log.extend(rows)
                     last_annotated = annotated_bgr
 
-                    # sample every 10 frames for gallery
-                    if frame_idx % 10 == 0:
+                    # Sample some frames for gallery (every 10th processed frame)
+                    if (
+                        processed_frames % 10 == 0
+                        and len(st.session_state.pose_preview_frames) < MAX_PREVIEW_FRAMES
+                    ):
                         rgb_small = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
                         st.session_state.pose_preview_frames.append(rgb_small)
 
-                    if frame_idx % 5 == 0:
-                        progress.progress(min(frame_idx / total_frames, 1.0))
+                    # Update progress based on both total and max frames
+                    frac_total = raw_frame_idx / max(total_frames, 1)
+                    frac_cap = processed_frames / MAX_PROCESSED_FRAMES
+                    progress.progress(min(frac_total, frac_cap, 1.0))
 
                 cap.release()
                 progress.progress(1.0)
 
-                st.success(f"Processed {frame_idx} frames.")
+                st.success(
+                    f"Processed {processed_frames} frames "
+                    f"(out of {total_frames} total video frames)."
+                )
 
                 # ---- Show last annotated frame ----
                 if last_annotated is not None:
                     safe_display_image(
                         last_annotated,
-                        caption="Annotated last frame of video"
+                        caption="Annotated last processed frame"
                     )
 
-                # ---- Display gallery of every 10th frame ----
+                # ---- Display gallery of sampled frames ----
                 if st.session_state.pose_preview_frames:
-                    st.markdown("### Playback Preview (every 10th frame)")
+                    st.markdown("### Playback Preview (every 10th processed frame)")
                     cols = st.columns(3)
 
                     for i, frame_rgb in enumerate(st.session_state.pose_preview_frames):
                         with cols[i % 3]:
-                            st.image(frame_rgb, caption=f"Frame {i*10}", width=250)
+                            st.image(frame_rgb, caption=f"Preview #{i+1}", width=250)
 
     # ----------------------------------------------------------
     # CSV LOG SECTION
@@ -436,4 +475,4 @@ as a mini “video playback” gallery.
             st.session_state.pose_frame_counter = 0
             st.experimental_rerun()
     else:
-        st.info("No data logged yet.")
+        st.info("No pose/hand data logged yet. Capture a frame or process a video.")
