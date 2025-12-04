@@ -1,533 +1,229 @@
 #!/usr/bin/env python3
-# ============================================================
-# CSc 8830 – Assignment 7
-# Stereo Object Size Estimator (Tab 1) + Pose & Hand Tracking (Tab 2)
-# ============================================================
-
 import os
 import sys
 import math
 from datetime import datetime
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pandas as pd
-import cv2
 import streamlit as st
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
+
+# ------------------------------------------------------
+# GLOBAL MEDIAPIPE LOAD (SAFE FOR STREAMLIT CLOUD)
+# ------------------------------------------------------
 import mediapipe as mp
-
-# --------------------------------------------------------------------
-# FIX: Add project root BEFORE importing from src
-# --------------------------------------------------------------------
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT_DIR not in sys.path:
-    sys.path.append(ROOT_DIR)
-
-from src.size_estimation import compute_3d_distance  # kept for debugging/info
-
-OUTPUT_DIR = os.path.join(ROOT_DIR, "output")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# ============================================================
-# MEDIAPIPE (POSE + HANDS) SETUP
-# ============================================================
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
 mp_hands = mp.solutions.hands
 
+POSE_MODEL = mp_pose.Pose(
+    static_image_mode=True,
+    model_complexity=0,        # LIGHTEST MODEL
+    enable_segmentation=False,
+    min_detection_confidence=0.5
+)
 
-def analyze_frame_pose_and_hands(frame_bgr, frame_index: int):
-    """
-    Run MediaPipe Pose + Hands on a single BGR frame.
+HANDS_MODEL = mp_hands.Hands(
+    static_image_mode=True,
+    max_num_hands=1,
+    min_detection_confidence=0.5
+)
 
-    Returns:
-        annotated_bgr: BGR image with landmarks drawn
-        rows: list[dict] describing each landmark, suitable for CSV.
-    """
-    rows = []
-    ts = datetime.utcnow().isoformat()
+# ------------------------------------------------------
+# PATH FIX
+# ------------------------------------------------------
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(ROOT_DIR, "output")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+# ------------------------------------------------------
+# STREAMLIT PAGE CONFIG
+# ------------------------------------------------------
+st.set_page_config(
+    page_title="Stereo Estimator + Pose Tracking",
+    layout="wide"
+)
 
-    with mp_pose.Pose(
-        static_image_mode=False,
-        model_complexity=1,
-        enable_segmentation=False,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-    ) as pose, mp_hands.Hands(
-        static_image_mode=False,
-        max_num_hands=2,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-    ) as hands:
-
-        pose_results = pose.process(frame_rgb)
-        hands_results = hands.process(frame_rgb)
-
-        annotated = frame_bgr.copy()
-
-        # Pose landmarks
-        if pose_results.pose_landmarks:
-            mp_drawing.draw_landmarks(
-                annotated,
-                pose_results.pose_landmarks,
-                mp_pose.POSE_CONNECTIONS,
-            )
-
-            for idx, lm in enumerate(pose_results.pose_landmarks.landmark):
-                rows.append(
-                    {
-                        "timestamp": ts,
-                        "frame_index": frame_index,
-                        "track": "pose",
-                        "landmark_index": idx,
-                        "x": lm.x,
-                        "y": lm.y,
-                        "z": lm.z,
-                        "visibility": lm.visibility,
-                    }
-                )
-
-        # Hand landmarks
-        if hands_results.multi_hand_landmarks and hands_results.multi_handedness:
-            for hand_lms, handedness in zip(
-                hands_results.multi_hand_landmarks,
-                hands_results.multi_handedness,
-            ):
-                label = handedness.classification[0].label.lower()  # 'left' or 'right'
-                track_name = f"{label}_hand"
-
-                mp_drawing.draw_landmarks(
-                    annotated,
-                    hand_lms,
-                    mp_hands.HAND_CONNECTIONS,
-                )
-
-                for idx, lm in enumerate(hand_lms.landmark):
-                    rows.append(
-                        {
-                            "timestamp": ts,
-                            "frame_index": frame_index,
-                            "track": track_name,
-                            "landmark_index": idx,
-                            "x": lm.x,
-                            "y": lm.y,
-                            "z": lm.z,
-                            "visibility": 1.0,  # hands do not expose visibility
-                        }
-                    )
-
-    return annotated, rows
-
-
-# ============================================================
-# STREAMLIT PAGE CONFIG + GLOBAL STYLE
-# ============================================================
-st.set_page_config(page_title="Stereo + Pose App – Assignment 7", layout="wide")
-
-# Prevent Streamlit from clipping the canvas (from your original code)
-st.markdown(
-    """
+st.markdown("""
 <style>
 div.stCanvas { overflow: visible !important; }
 </style>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
-# ============================================================
-# TABS
-# ============================================================
-tab_stereo, tab_pose = st.tabs(
-    ["Stereo Object Size Estimator", "Pose & Hand Tracking"]
-)
+# ------------------------------------------------------
+# POSE + HANDS HELPER (LIGHTWEIGHT)
+# ------------------------------------------------------
+def analyze_image_pose_and_hands(img_bgr):
+    """Lightweight pose+hands extraction for single images."""
+    results = []
 
-# ============================================================
-# TAB 1 – YOUR ORIGINAL STEREO OBJECT SIZE ESTIMATOR
-# (logic kept the same, only wrapped in a tab)
-# ============================================================
-with tab_stereo:
+    try:
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-    st.title("Stereo Object Size Estimator – Click Three Points")
+        pose_res = POSE_MODEL.process(img_rgb)
+        hands_res = HANDS_MODEL.process(img_rgb)
 
-    pair_index = st.number_input(
-        "Select Stereo Pair", min_value=1, max_value=50, value=1
-    )
-
-    # Load rectified left image
-    left_path = f"data/output/rectified/rect_left_{pair_index}.jpg"
-
-    if not os.path.exists(left_path):
-        st.error(f"Rectified image not found: {left_path}")
-        st.stop()
-
-    # Load original full-resolution image
-    img = Image.open(left_path)
-    img_w, img_h = img.size
-
-    # -----------------------------------------------------
-    # SCALE IMAGE DOWN ONLY FOR DISPLAY
-    # (clicks get re-scaled back to original resolution)
-    # -----------------------------------------------------
-    MAX_WIDTH = 900
-
-    if img_w > MAX_WIDTH:
-        scale_factor = MAX_WIDTH / img_w
-        disp_w = MAX_WIDTH
-        disp_h = int(img_h * scale_factor)
-    else:
-        scale_factor = 1.0
-        disp_w = img_w
-        disp_h = img_h
-
-    img_display = img.resize((disp_w, disp_h))
-
-    st.write(
-        "### Click **three points** on the object:\n"
-        "- Point 1: common corner\n"
-        "- Point 2 & Point 3: other two corners along edges\n"
-        "The shorter distance from Point 1 is reported as *width*, the longer as *height*."
-    )
-
-    # Add padding to avoid cropping
-    EXTRA_PAD = int(0.15 * disp_h)
-
-    canvas = st_canvas(
-        stroke_width=5,
-        stroke_color="#ff0000",
-        background_image=img_display,
-        height=disp_h + EXTRA_PAD,
-        width=disp_w,
-        drawing_mode="point",
-        key="canvas_measure",
-    )
-
-    # 2D calibration: pixel length that corresponds to 40 cm in your setup
-    # From your example: P1=(1641,1242), P2=(1761,3365)
-    REF_P1 = (1641, 1242)
-    REF_P2 = (1761, 3365)
-    REF_LEN_PX = math.hypot(REF_P2[0] - REF_P1[0], REF_P2[1] - REF_P1[1])
-    CM_PER_PIXEL = 40.0 / REF_LEN_PX  # ≈ 0.01881 cm/px
-
-    def to_original_coords(obj):
-        """Convert a Fabric.js point object to original image coords."""
-        x_s = int(obj["left"])
-        y_s = int(obj["top"])
-        x = int(x_s / scale_factor)
-        y = int(y_s / scale_factor)
-        return (x_s, y_s), (x, y)
-
-    if canvas.json_data:
-        objs = canvas.json_data.get("objects", [])
-
-        if len(objs) == 1:
-            st.info("Click two more points to measure width and height.")
-        elif len(objs) == 2:
-            st.info("Click one more point (total 3) so we can compute width and height.")
-
-        if len(objs) >= 2:
-            # ---- Point 1 and Point 2 ----
-            p1_s, p1 = to_original_coords(objs[0])
-            p2_s, p2 = to_original_coords(objs[1])
-
-            # distance P1-P2, used if only two points
-            dx12 = p2[0] - p1[0]
-            dy12 = p2[1] - p1[1]
-            pix_12 = math.hypot(dx12, dy12)
-            len12_cm = pix_12 * CM_PER_PIXEL
-
-            if len(objs) == 2:
-                st.success(f"Single edge length (P1–P2): **{len12_cm:.2f} cm**")
-
-        # If we have 3 or more points, use P1 as common corner and P2, P3 as edges
-        if len(objs) >= 3:
-            p3_s, p3 = to_original_coords(objs[2])
-            st.write("Point 3 (display):", p3_s, "  (original):", p3)
-
-            # distance P1-P3
-            dx13 = p3[0] - p1[0]
-            dy13 = p3[1] - p1[1]
-            pix_13 = math.hypot(dx13, dy13)
-            len13_cm = pix_13 * CM_PER_PIXEL
-
-            st.write(f"Edge from P1–P2: {len12_cm:.2f} cm")
-            st.write(f"Edge from P1–P3: {len13_cm:.2f} cm")
-
-            # decide which is width vs height
-            if len12_cm <= len13_cm:
-                width_cm = len12_cm
-                height_cm = len13_cm
-            else:
-                width_cm = len13_cm
-                height_cm = len12_cm
-
-            st.success(
-                f"Estimated dimensions:\n\n"
-                f"- **Width** (shorter): {width_cm:.2f} cm\n"
-                f"- **Height** (longer): {height_cm:.2f} cm"
-            )
-
-def safe_display_image(bgr_img, caption=""):
-    """
-    Safely displays an image in Streamlit WITHOUT Axios 400 errors.
-    Downscales large frames before converting to RGB.
-    """
-    max_width = 650
-    h, w = bgr_img.shape[:2]
-
-    if w > max_width:
-        scale = max_width / w
-        new_w = int(w * scale)
-        new_h = int(h * scale)
-        bgr_img = cv2.resize(bgr_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-    rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
-    st.image(rgb, caption=caption)   # <=== FIXED
-
-
-
-# ============================================================
-# TAB 2 – POSE + HAND TRACKING (CLOUD-SAFE VERSION)
-# ============================================================
-with tab_pose:
-    st.title("Pose & Hand Tracking (MediaPipe) – Cloud Optimized")
-
-    st.markdown(
-        """
-This cloud-optimized version prevents app crashes on Render by:
-
-- Processing **at most 150 frames**  
-- Running MediaPipe on **every 3rd frame**  
-- Downscaling frames internally  
-- Storing up to **30 preview frames**  
-- Reusing MediaPipe models (no reloading per frame)
-
-Locally (on the cluster), the full version runs without limits.
-        """
-    )
-
-    # Limits for Render stability
-    MAX_FRAMES = 150
-    FRAME_STEP = 3
-    MAX_GALLERY = 30
-
-    # ----------------------------
-    # Session State Initialization
-    # ----------------------------
-    if "pose_hand_log" not in st.session_state:
-        st.session_state.pose_hand_log = []
-    if "pose_frame_counter" not in st.session_state:
-        st.session_state.pose_frame_counter = 0
-    if "pose_preview_frames" not in st.session_state:
-        st.session_state.pose_preview_frames = []
-
-    # ----------------------------
-    # MediaPipe Model (cached)
-    # ----------------------------
-    @st.cache_resource
-    def load_mp_models():
-        pose = mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=1,
-            enable_segmentation=False,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
-        hands = mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=2,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
-        return pose, hands
-
-    pose_model, hands_model = load_mp_models()
-
-    # ----------------------------
-    # Helper: Run MP on a frame
-    # ----------------------------
-    def run_mp(frame_bgr, frame_idx):
-        """Downscale + run pose + hand tracking."""
-        h, w = frame_bgr.shape[:2]
-
-        # downscale for cloud
-        MAX_W = 640
-        if w > MAX_W:
-            scale = MAX_W / w
-            frame_bgr = cv2.resize(
-                frame_bgr,
-                (int(w * scale), int(h * scale)),
-                interpolation=cv2.INTER_AREA,
-            )
-
-        ts = datetime.utcnow().isoformat()
-        rows = []
-
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        pose_res = pose_model.process(rgb)
-        hand_res = hands_model.process(rgb)
-
-        annotated = frame_bgr.copy()
+        annotated = img_bgr.copy()
 
         # Pose
         if pose_res.pose_landmarks:
             mp_drawing.draw_landmarks(
-                annotated,
-                pose_res.pose_landmarks,
-                mp_pose.POSE_CONNECTIONS,
+                annotated, pose_res.pose_landmarks, mp_pose.POSE_CONNECTIONS
             )
-            for i, lm in enumerate(pose_res.pose_landmarks.landmark):
-                rows.append({
-                    "timestamp": ts,
-                    "frame_index": frame_idx,
+            for idx, lm in enumerate(pose_res.pose_landmarks.landmark):
+                results.append({
                     "track": "pose",
-                    "landmark_index": i,
+                    "idx": idx,
                     "x": lm.x, "y": lm.y, "z": lm.z,
-                    "visibility": lm.visibility,
+                    "visibility": lm.visibility
                 })
 
         # Hands
-        if hand_res.multi_hand_landmarks:
-            for hand_lm, handedness in zip(
-                hand_res.multi_hand_landmarks,
-                hand_res.multi_handedness,
-            ):
-                label = handedness.classification[0].label.lower()
-                track_name = f"{label}_hand"
-
+        if hands_res.multi_hand_landmarks:
+            for hand in hands_res.multi_hand_landmarks:
                 mp_drawing.draw_landmarks(
-                    annotated, hand_lm, mp_hands.HAND_CONNECTIONS
+                    annotated, hand, mp_hands.HAND_CONNECTIONS
                 )
-
-                for i, lm in enumerate(hand_lm.landmark):
-                    rows.append({
-                        "timestamp": ts,
-                        "frame_index": frame_idx,
-                        "track": track_name,
-                        "landmark_index": i,
+                for idx, lm in enumerate(hand.landmark):
+                    results.append({
+                        "track": "hand",
+                        "idx": idx,
                         "x": lm.x, "y": lm.y, "z": lm.z,
-                        "visibility": 1.0,
+                        "visibility": 1.0
                     })
 
-        return annotated, rows
+        return annotated, results
 
-    # ----------------------------
-    # UI – Select input mode
-    # ----------------------------
+    except Exception as e:
+        print("ERROR in MediaPipe:", e)
+        return img_bgr, []
+
+
+# ------------------------------------------------------
+# TABS
+# ------------------------------------------------------
+tab1, tab2 = st.tabs(["Stereo Object Size Estimator", "Pose & Hand Tracking"])
+
+
+# ======================================================
+# TAB 1 — STEREO (MINIMAL + WORKING)
+# ======================================================
+with tab1:
+    st.header("Stereo Object Size Estimator (3-Point Measurement)")
+
+    pair_index = st.number_input(
+        "Select Pair", min_value=1, max_value=50, value=1, step=1
+    )
+
+    img_path = f"data/output/rectified/rect_left_{pair_index}.jpg"
+    if not os.path.exists(img_path):
+        st.error(f"Image not found: {img_path}")
+        st.stop()
+
+    img = Image.open(img_path)
+    W, H = img.size
+
+    MAX_W = 900
+    scale = min(1, MAX_W / W)
+    img_disp = img.resize((int(W * scale), int(H * scale)))
+
+    st.write("Click **three points** on one object: corner + two edges.")
+
+    canvas = st_canvas(
+        stroke_width=5,
+        stroke_color="#ff0000",
+        background_image=img_disp,
+        height=int(H * scale),
+        width=int(W * scale),
+        drawing_mode="point",
+        key="stereo_canvas"
+    )
+
+    # Fixed reference (you can update)
+    REF_P1 = (1641, 1242)
+    REF_P2 = (1761, 3365)
+    REF_LEN_PX = math.hypot(REF_P1[0]-REF_P2[0], REF_P1[1]-REF_P2[1])
+    CM_PER_PIXEL = 40.0 / REF_LEN_PX
+
+    def to_orig(obj):
+        return (int(obj["left"] / scale), int(obj["top"] / scale))
+
+    if canvas.json_data:
+        objs = canvas.json_data["objects"]
+
+        if len(objs) >= 2:
+            p1 = to_orig(objs[0])
+            p2 = to_orig(objs[1])
+
+            d12 = math.dist(p1, p2) * CM_PER_PIXEL
+            st.info(f"Distance P1–P2: **{d12:.2f} cm**")
+
+        if len(objs) >= 3:
+            p3 = to_orig(objs[2])
+            d13 = math.dist(p1, p3) * CM_PER_PIXEL
+
+            st.success(
+                f"""
+### Measured Dimensions  
+- Shorter edge: **{min(d12, d13):.2f} cm**  
+- Longer edge: **{max(d12, d13):.2f} cm**  
+                """
+            )
+
+
+# ======================================================
+# TAB 2 — LIGHTWEIGHT POSE + HAND TRACKING
+# ======================================================
+with tab2:
+    st.header("Pose & Hand Tracking (Lightweight Mode)")
+
+    st.write("Upload an image OR take a webcam snapshot.")
+
     mode = st.radio(
-        "Select input mode:",
-        ["Webcam snapshot", "Upload video file"],
+        "Input mode:",
+        ["Upload image", "Webcam snapshot"],
         horizontal=True
     )
 
-    # ----------------------------
-    # MODE 1 – Webcam
-    # ----------------------------
-    if mode == "Webcam snapshot":
-        img = st.camera_input("Capture a frame")
-        if img:
-            arr = np.frombuffer(img.getvalue(), np.uint8)
-            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    img_bgr = None
 
-            st.session_state.pose_frame_counter += 1
-            idx = st.session_state.pose_frame_counter
+    if mode == "Upload image":
+        up = st.file_uploader("Upload an image", type=["jpg", "png", "jpeg"])
+        if up:
+            data = np.frombuffer(up.read(), np.uint8)
+            img_bgr = cv2.imdecode(data, cv2.IMREAD_COLOR)
 
-            annotated, rows = run_mp(frame, idx)
-            st.session_state.pose_hand_log.extend(rows)
-
-            safe_display_image(annotated, f"Webcam Frame #{idx}")
-
-    # ----------------------------
-    # MODE 2 – Video Upload
-    # ----------------------------
     else:
-        st.info(f"Processes at most {MAX_FRAMES} frames (every {FRAME_STEP}th frame)")
+        snap = st.camera_input("Take photo")
+        if snap:
+            data = np.frombuffer(snap.getvalue(), np.uint8)
+            img_bgr = cv2.imdecode(data, cv2.IMREAD_COLOR)
 
-        video = st.file_uploader("Upload a video", type=["mp4", "mov", "avi", "mkv"])
+    if img_bgr is not None:
+        st.subheader("Processed Image")
 
-        if video:
-            temp_path = Path(ROOT_DIR) / "tmp_video.mp4"
-            with open(temp_path, "wb") as f:
-                f.write(video.read())
+        annotated, rows = analyze_image_pose_and_hands(img_bgr)
 
-            if st.button("Process uploaded video"):
-                cap = cv2.VideoCapture(str(temp_path))
-                total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+        st.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), caption="Pose Result")
 
-                raw_idx = 0
-                processed = 0
+        if rows:
+            df = pd.DataFrame(rows)
+            st.dataframe(df)
 
-                st.session_state.pose_preview_frames = []
-                prog = st.progress(0.0)
+            csv_path = os.path.join(OUTPUT_DIR, "pose_hand.csv")
+            df.to_csv(csv_path, index=False)
 
-                # approximate loop limit on cloud
-                max_raw = min(total, MAX_FRAMES * FRAME_STEP)
+            st.download_button(
+                "Download Landmark CSV",
+                open(csv_path, "rb"),
+                file_name="pose_hand.csv",
+                mime="text/csv"
+            )
+        else:
+            st.warning("No pose/hands detected.")
 
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
 
-                    raw_idx += 1
-                    prog.progress(raw_idx / max_raw)
-
-                    if raw_idx % FRAME_STEP != 0:
-                        continue
-
-                    processed += 1
-                    if processed > MAX_FRAMES:
-                        break
-
-                    st.session_state.pose_frame_counter += 1
-                    idx = st.session_state.pose_frame_counter
-
-                    annotated, rows = run_mp(frame, idx)
-                    st.session_state.pose_hand_log.extend(rows)
-
-                    if len(st.session_state.pose_preview_frames) < MAX_GALLERY:
-                        st.session_state.pose_preview_frames.append(
-                            cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-                        )
-
-                cap.release()
-                prog.progress(1.0)
-
-                st.success(f"Processed {processed} frames!")
-
-                # show last frame
-                if processed > 0:
-                    safe_display_image(annotated, "Last processed frame")
-
-                # gallery
-                if st.session_state.pose_preview_frames:
-                    st.markdown("### Preview Frames")
-                    cols = st.columns(3)
-                    for i, fr in enumerate(st.session_state.pose_preview_frames):
-                        with cols[i % 3]:
-                            st.image(fr, caption=f"Sample #{i+1}", width=250)
-
-    # ----------------------------
-    # CSV Logging
-    # ----------------------------
-    st.markdown("### Pose + Hand Landmark CSV Log")
-
-    if st.session_state.pose_hand_log:
-        df = pd.DataFrame(st.session_state.pose_hand_log)
-        st.dataframe(df.head(100))
-
-        csv_path = os.path.join(OUTPUT_DIR, "pose_hand_tracks.csv")
-        df.to_csv(csv_path, index=False)
-
-        with open(csv_path, "rb") as f:
-            st.download_button("Download CSV", f, "pose_hand_tracks.csv")
-
-        if st.button("Clear log"):
-            st.session_state.pose_hand_log = []
-            st.session_state.pose_preview_frames = []
-            st.session_state.pose_frame_counter = 0
-            st.experimental_rerun()
-    else:
-        st.info("No pose/hand data logged yet.")
