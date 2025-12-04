@@ -1,5 +1,8 @@
-opencv-python
-numpy
-matplotlib
-streamlit
+streamlit==1.29.0
+streamlit-drawable-canvas==0.9.3
+mediapipe==0.10.21
+opencv-contrib-python-headless
 pandas
+numpy<2.0
+Pillow
+protobuf<5
