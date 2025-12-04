@@ -270,189 +270,189 @@ with tab_stereo:
                 f"- **Height** (longer): {height_cm:.2f} cm"
             )
 
-# ============================================================
-# TAB 2 – POSE + HAND TRACKING WITH CSV LOGGING + FRAME GALLERY
-# ============================================================
-with tab_pose:
+# # ============================================================
+# # TAB 2 – POSE + HAND TRACKING WITH CSV LOGGING + FRAME GALLERY
+# # ============================================================
+# with tab_pose:
 
-    st.title("Real-Time Pose and Hand Tracking (MediaPipe)")
+#     st.title("Real-Time Pose and Hand Tracking (MediaPipe)")
 
-    # Initialize state
-    if "pose_hand_log" not in st.session_state:
-        st.session_state.pose_hand_log = []
-    if "pose_frame_counter" not in st.session_state:
-        st.session_state.pose_frame_counter = 0
-    if "gallery_frames" not in st.session_state:
-        st.session_state.gallery_frames = []   # store sampled frames for display
+#     # Initialize state
+#     if "pose_hand_log" not in st.session_state:
+#         st.session_state.pose_hand_log = []
+#     if "pose_frame_counter" not in st.session_state:
+#         st.session_state.pose_frame_counter = 0
+#     if "gallery_frames" not in st.session_state:
+#         st.session_state.gallery_frames = []   # store sampled frames for display
 
-    st.markdown(
-        """
-This tab performs **pose estimation + hand tracking** using MediaPipe.
-Landmarks are saved into a CSV file.
+#     st.markdown(
+#         """
+# This tab performs **pose estimation + hand tracking** using MediaPipe.
+# Landmarks are saved into a CSV file.
 
-### CSV Columns:
-- `timestamp` — UTC time  
-- `frame_index` — sequential global frame number  
-- `track` — pose / left_hand / right_hand  
-- `landmark_index` — index of the point  
-- `x, y, z` — normalized coordinates  
-- `visibility` — pose confidence (hands = 1.0)
-        """
-    )
+# ### CSV Columns:
+# - `timestamp` — UTC time  
+# - `frame_index` — sequential global frame number  
+# - `track` — pose / left_hand / right_hand  
+# - `landmark_index` — index of the point  
+# - `x, y, z` — normalized coordinates  
+# - `visibility` — pose confidence (hands = 1.0)
+#         """
+#     )
 
-    mode = st.radio(
-        "Input mode",
-        ["Webcam snapshot (browser)", "Upload video file"],
-        horizontal=True,
-    )
+#     mode = st.radio(
+#         "Input mode",
+#         ["Webcam snapshot (browser)", "Upload video file"],
+#         horizontal=True,
+#     )
 
-    # ============================================================
-    # MODE A — WEBCAM SNAPSHOT
-    # ============================================================
-    if mode == "Webcam snapshot (browser)":
-        st.info("Capture a webcam frame. It will be logged and displayed.")
+#     # ============================================================
+#     # MODE A — WEBCAM SNAPSHOT
+#     # ============================================================
+#     if mode == "Webcam snapshot (browser)":
+#         st.info("Capture a webcam frame. It will be logged and displayed.")
 
-        cam_img = st.camera_input("Take a snapshot")
+#         cam_img = st.camera_input("Take a snapshot")
 
-        if cam_img is not None:
-            file_bytes = np.asarray(bytearray(cam_img.getvalue()), dtype=np.uint8)
-            frame_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+#         if cam_img is not None:
+#             file_bytes = np.asarray(bytearray(cam_img.getvalue()), dtype=np.uint8)
+#             frame_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-            st.session_state.pose_frame_counter += 1
-            frame_idx = st.session_state.pose_frame_counter
+#             st.session_state.pose_frame_counter += 1
+#             frame_idx = st.session_state.pose_frame_counter
 
-            annotated_bgr, rows = analyze_frame_pose_and_hands(frame_bgr, frame_idx)
-            st.session_state.pose_hand_log.extend(rows)
+#             annotated_bgr, rows = analyze_frame_pose_and_hands(frame_bgr, frame_idx)
+#             st.session_state.pose_hand_log.extend(rows)
 
-            # resize & show
-            annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
-            max_w = 900
-            h, w = annotated_rgb.shape[:2]
-            if w > max_w:
-                scale = max_w / w
-                annotated_rgb = cv2.resize(
-                    annotated_rgb, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
-                )
+#             # resize & show
+#             annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+#             max_w = 900
+#             h, w = annotated_rgb.shape[:2]
+#             if w > max_w:
+#                 scale = max_w / w
+#                 annotated_rgb = cv2.resize(
+#                     annotated_rgb, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
+#                 )
 
-            st.image(annotated_rgb, caption=f"Webcam Frame #{frame_idx}")
+#             st.image(annotated_rgb, caption=f"Webcam Frame #{frame_idx}")
 
-    # ============================================================
-    # MODE B — VIDEO UPLOAD
-    # ============================================================
-    else:
-        st.info("Upload a short video. Frames will be processed and sampled every 10 frames.")
+#     # ============================================================
+#     # MODE B — VIDEO UPLOAD
+#     # ============================================================
+#     else:
+#         st.info("Upload a short video. Frames will be processed and sampled every 10 frames.")
 
-        video_file = st.file_uploader(
-            "Upload a video file (MP4 recommended)",
-            type=["mp4", "mov", "avi", "mkv"],
-        )
+#         video_file = st.file_uploader(
+#             "Upload a video file (MP4 recommended)",
+#             type=["mp4", "mov", "avi", "mkv"],
+#         )
 
-        if video_file is not None:
+#         if video_file is not None:
 
-            tmp_path = Path(OUTPUT_DIR) / "uploaded_pose_video.mp4"
-            with open(tmp_path, "wb") as f:
-                f.write(video_file.read())
+#             tmp_path = Path(OUTPUT_DIR) / "uploaded_pose_video.mp4"
+#             with open(tmp_path, "wb") as f:
+#                 f.write(video_file.read())
 
-            if st.button("Process uploaded video"):
-                cap = cv2.VideoCapture(str(tmp_path))
-                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+#             if st.button("Process uploaded video"):
+#                 cap = cv2.VideoCapture(str(tmp_path))
+#                 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
 
-                frame_idx = 0
-                progress = st.progress(0.0)
-                st.session_state.gallery_frames = []  # reset gallery
+#                 frame_idx = 0
+#                 progress = st.progress(0.0)
+#                 st.session_state.gallery_frames = []  # reset gallery
 
-                last_annotated = None
+#                 last_annotated = None
 
-                while True:
-                    ret, frame_bgr = cap.read()
-                    if not ret:
-                        break
+#                 while True:
+#                     ret, frame_bgr = cap.read()
+#                     if not ret:
+#                         break
 
-                    frame_idx += 1
-                    st.session_state.pose_frame_counter += 1
-                    global_idx = st.session_state.pose_frame_counter
+#                     frame_idx += 1
+#                     st.session_state.pose_frame_counter += 1
+#                     global_idx = st.session_state.pose_frame_counter
 
-                    annotated_bgr, rows = analyze_frame_pose_and_hands(frame_bgr, global_idx)
-                    st.session_state.pose_hand_log.extend(rows)
-                    last_annotated = annotated_bgr
+#                     annotated_bgr, rows = analyze_frame_pose_and_hands(frame_bgr, global_idx)
+#                     st.session_state.pose_hand_log.extend(rows)
+#                     last_annotated = annotated_bgr
 
-                    # =====================================================
-                    # NEW: Save every 10th frame to gallery
-                    # =====================================================
-                    if frame_idx % 10 == 0:
-                        rgb_small = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
-                        h, w = rgb_small.shape[:2]
-                        scale = 300 / max(h, w)
-                        rgb_small = cv2.resize(
-                            rgb_small,
-                            (int(w * scale), int(h * scale)),
-                            interpolation=cv2.INTER_AREA,
-                        )
-                        st.session_state.gallery_frames.append(rgb_small)
+#                     # =====================================================
+#                     # NEW: Save every 10th frame to gallery
+#                     # =====================================================
+#                     if frame_idx % 10 == 0:
+#                         rgb_small = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+#                         h, w = rgb_small.shape[:2]
+#                         scale = 300 / max(h, w)
+#                         rgb_small = cv2.resize(
+#                             rgb_small,
+#                             (int(w * scale), int(h * scale)),
+#                             interpolation=cv2.INTER_AREA,
+#                         )
+#                         st.session_state.gallery_frames.append(rgb_small)
 
-                        # limit gallery size
-                        if len(st.session_state.gallery_frames) > 50:
-                            st.session_state.gallery_frames.pop(0)
+#                         # limit gallery size
+#                         if len(st.session_state.gallery_frames) > 50:
+#                             st.session_state.gallery_frames.pop(0)
 
-                    # update progress
-                    if frame_idx % 5 == 0:
-                        progress.progress(min(frame_idx / total_frames, 1.0))
+#                     # update progress
+#                     if frame_idx % 5 == 0:
+#                         progress.progress(min(frame_idx / total_frames, 1.0))
 
-                cap.release()
-                progress.progress(1.0)
-                st.success(f"Processed {frame_idx} frames.")
+#                 cap.release()
+#                 progress.progress(1.0)
+#                 st.success(f"Processed {frame_idx} frames.")
 
-                # -------------------------------------------------------
-                # Display last annotated frame
-                # -------------------------------------------------------
-                if last_annotated is not None:
-                    rgb = cv2.cvtColor(last_annotated, cv2.COLOR_BGR2RGB)
-                    h, w = rgb.shape[:2]
-                    max_w = 900
-                    if w > max_w:
-                        scale = max_w / w
-                        rgb = cv2.resize(
-                            rgb, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
-                        )
-                    st.image(rgb, caption="Last Annotated Frame")
+#                 # -------------------------------------------------------
+#                 # Display last annotated frame
+#                 # -------------------------------------------------------
+#                 if last_annotated is not None:
+#                     rgb = cv2.cvtColor(last_annotated, cv2.COLOR_BGR2RGB)
+#                     h, w = rgb.shape[:2]
+#                     max_w = 900
+#                     if w > max_w:
+#                         scale = max_w / w
+#                         rgb = cv2.resize(
+#                             rgb, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
+#                         )
+#                     st.image(rgb, caption="Last Annotated Frame")
 
-                # -------------------------------------------------------
-                # DISPLAY FRAME GALLERY (step size = 10)
-                # -------------------------------------------------------
-                if st.session_state.gallery_frames:
-                    st.markdown("### Frame Gallery (Every 10th Frame)")
-                    cols = st.columns(3)
+#                 # -------------------------------------------------------
+#                 # DISPLAY FRAME GALLERY (step size = 10)
+#                 # -------------------------------------------------------
+#                 if st.session_state.gallery_frames:
+#                     st.markdown("### Frame Gallery (Every 10th Frame)")
+#                     cols = st.columns(3)
 
-                    for i, frame_rgb in enumerate(st.session_state.gallery_frames):
-                        with cols[i % 3]:
-                            st.image(frame_rgb, caption=f"Frame {i * 10}", width=250)
+#                     for i, frame_rgb in enumerate(st.session_state.gallery_frames):
+#                         with cols[i % 3]:
+#                             st.image(frame_rgb, caption=f"Frame {i * 10}", width=250)
 
-    # ============================================================
-    # CSV LOG VIEWER
-    # ============================================================
-    st.markdown("---")
-    st.markdown("### Pose + Hand Landmark CSV Log")
+#     # ============================================================
+#     # CSV LOG VIEWER
+#     # ============================================================
+#     st.markdown("---")
+#     st.markdown("### Pose + Hand Landmark CSV Log")
 
-    if st.session_state.pose_hand_log:
-        df = pd.DataFrame(st.session_state.pose_hand_log)
-        st.dataframe(df.head(100))
+#     if st.session_state.pose_hand_log:
+#         df = pd.DataFrame(st.session_state.pose_hand_log)
+#         st.dataframe(df.head(100))
 
-        csv_path = os.path.join(OUTPUT_DIR, "pose_hand_tracks.csv")
-        df.to_csv(csv_path, index=False)
+#         csv_path = os.path.join(OUTPUT_DIR, "pose_hand_tracks.csv")
+#         df.to_csv(csv_path, index=False)
 
-        with open(csv_path, "rb") as f:
-            st.download_button(
-                "Download pose_hand_tracks.csv",
-                f,
-                file_name="pose_hand_tracks.csv",
-                mime="text/csv",
-            )
+#         with open(csv_path, "rb") as f:
+#             st.download_button(
+#                 "Download pose_hand_tracks.csv",
+#                 f,
+#                 file_name="pose_hand_tracks.csv",
+#                 mime="text/csv",
+#             )
 
-        if st.button("Clear Log"):
-            st.session_state.pose_hand_log = []
-            st.session_state.pose_frame_counter = 0
-            st.session_state.gallery_frames = []
-            st.experimental_rerun()
+#         if st.button("Clear Log"):
+#             st.session_state.pose_hand_log = []
+#             st.session_state.pose_frame_counter = 0
+#             st.session_state.gallery_frames = []
+#             st.experimental_rerun()
 
-    else:
-        st.info("No pose/hand data yet. Capture webcam frames or process a video.")
+#     else:
+#         st.info("No pose/hand data yet. Capture webcam frames or process a video.")
