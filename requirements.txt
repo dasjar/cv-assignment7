@@ -1,6 +1,5 @@
 opencv-python
-opencv-contrib-python
 numpy
+matplotlib
 streamlit
-mediapipe
 pandas
