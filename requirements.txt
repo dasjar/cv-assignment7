@@ -1,14 +1,7 @@
-# Streamlit UI
 streamlit==1.29.0
 streamlit-drawable-canvas==0.9.3
-
-# Computer vision
+mediapipe==0.10.21
 opencv-python-headless==4.8.0.74
-
-# Mediapipe (must use a Linux-compatible version)
-mediapipe==0.10.10
-
-# Math & image processing
 numpy==1.26.4
-pandas==2.1.4
-Pillow==10.2.0
+pandas==2.2.2
+Pillow==10.4.0
