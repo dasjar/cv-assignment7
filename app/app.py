@@ -16,7 +16,7 @@ import cv2
 import streamlit as st
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
-import mediapipe as mp
+# import mediapipe as mp
 
 # --------------------------------------------------------------------
 # FIX: Add project root BEFORE importing from src
@@ -141,9 +141,12 @@ div.stCanvas { overflow: visible !important; }
 # ============================================================
 # TABS
 # ============================================================
-tab_stereo, tab_pose = st.tabs(
-    ["Stereo Object Size Estimator", "Pose & Hand Tracking"]
-)
+# tab_stereo, tab_pose = st.tabs(
+#     ["Stereo Object Size Estimator", "Pose & Hand Tracking"]
+# )
+
+tab_stereo = st.tabs(["Stereo Object Size Estimator"])[0]
+
 
 # ============================================================
 # TAB 1 – YOUR ORIGINAL STEREO OBJECT SIZE ESTIMATOR
