@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 # ============================================================
 # CSc 8830 – Assignment 7
-# Stereo Size Estimator + Pose & Hand Tracking (MediaPipe)
-# Fully patched for Render deployment
+# Stereo Object Size Estimator (Tab 1) + Pose & Hand Tracking (Tab 2)
 # ============================================================
 
 import os
 import sys
 import math
-import base64
-from io import BytesIO
 from datetime import datetime
 from pathlib import Path
 
@@ -21,20 +18,20 @@ from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 import mediapipe as mp
 
-# ------------------------------------------------------------
-# FIX PATH FOR MODULE IMPORTS
-# ------------------------------------------------------------
+# --------------------------------------------------------------------
+# FIX: Add project root BEFORE importing from src
+# --------------------------------------------------------------------
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.append(ROOT_DIR)
 
-from src.size_estimation import compute_3d_distance
+from src.size_estimation import compute_3d_distance  # kept for debugging/info
 
 OUTPUT_DIR = os.path.join(ROOT_DIR, "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ============================================================
-# MEDIAPIPE SETUP
+# MEDIAPIPE (POSE + HANDS) SETUP
 # ============================================================
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
@@ -43,10 +40,11 @@ mp_hands = mp.solutions.hands
 
 def analyze_frame_pose_and_hands(frame_bgr, frame_index: int):
     """
-    Run MediaPipe Pose + Hands on one BGR frame.
+    Run MediaPipe Pose + Hands on a single BGR frame.
+
     Returns:
-        annotated frame
-        list of CSV-rows {timestamp, frame_index, x,y,z,...}
+        annotated_bgr: BGR image with landmarks drawn
+        rows: list[dict] describing each landmark, suitable for CSV.
     """
     rows = []
     ts = datetime.utcnow().isoformat()
@@ -99,7 +97,7 @@ def analyze_frame_pose_and_hands(frame_bgr, frame_index: int):
                 hands_results.multi_hand_landmarks,
                 hands_results.multi_handedness,
             ):
-                label = handedness.classification[0].label.lower()
+                label = handedness.classification[0].label.lower()  # 'left' or 'right'
                 track_name = f"{label}_hand"
 
                 mp_drawing.draw_landmarks(
@@ -118,7 +116,7 @@ def analyze_frame_pose_and_hands(frame_bgr, frame_index: int):
                             "x": lm.x,
                             "y": lm.y,
                             "z": lm.z,
-                            "visibility": 1.0,
+                            "visibility": 1.0,  # hands do not expose visibility
                         }
                     )
 
@@ -126,76 +124,56 @@ def analyze_frame_pose_and_hands(frame_bgr, frame_index: int):
 
 
 # ============================================================
-# STREAMLIT PAGE CONFIG
+# STREAMLIT PAGE CONFIG + GLOBAL STYLE
 # ============================================================
-st.set_page_config(page_title="Assignment 7 – Stereo + Pose Tracking", layout="wide")
+st.set_page_config(page_title="Stereo + Pose App – Assignment 7", layout="wide")
 
+# Prevent Streamlit from clipping the canvas (from your original code)
 st.markdown(
     """
-    <style>
-    div.stCanvas { overflow: visible !important; }
-    </style>
-    """,
+<style>
+div.stCanvas { overflow: visible !important; }
+</style>
+""",
     unsafe_allow_html=True,
 )
 
 # ============================================================
-# HELPER: Convert PIL to Base64 data URL (REPLACES image_to_url)
-# ============================================================
-def pil_to_data_url(pil_img):
-    buf = BytesIO()
-    pil_img.save(buf, format="PNG")
-    data = base64.b64encode(buf.getvalue()).decode("utf-8")
-    return f"data:image/png;base64,{data}"
-
-
-# ============================================================
-# SAFE IMAGE DISPLAY
-# ============================================================
-def safe_display_image(bgr_img, caption=""):
-    """Prevent huge images from causing Render 502 errors."""
-    max_width = 650
-    h, w = bgr_img.shape[:2]
-
-    if w > max_width:
-        scale = max_width / w
-        bgr_img = cv2.resize(
-            bgr_img,
-            (int(w * scale), int(h * scale)),
-            interpolation=cv2.INTER_AREA,
-        )
-
-    rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
-    st.image(rgb, caption=caption)
-
-
-# ============================================================
 # TABS
 # ============================================================
-tab_stereo, tab_pose = st.tabs([
-    "Stereo Object Size Estimator",
-    "Pose & Hand Tracking",
-])
+tab_stereo, tab_pose = st.tabs(
+    ["Stereo Object Size Estimator", "Pose & Hand Tracking"]
+)
 
 # ============================================================
-# TAB 1 — STEREO SIZE ESTIMATOR
+# TAB 1 – YOUR ORIGINAL STEREO OBJECT SIZE ESTIMATOR
+# (logic kept the same, only wrapped in a tab)
 # ============================================================
 with tab_stereo:
 
-    st.title("Stereo Object Size Estimator (3-Point Measurement)")
+    st.title("Stereo Object Size Estimator – Click Three Points")
 
-    pair_index = st.number_input("Select Pair", min_value=1, max_value=50, value=1)
+    pair_index = st.number_input(
+        "Select Stereo Pair", min_value=1, max_value=50, value=1
+    )
 
+    # Load rectified left image
     left_path = f"data/output/rectified/rect_left_{pair_index}.jpg"
 
     if not os.path.exists(left_path):
         st.error(f"Rectified image not found: {left_path}")
         st.stop()
 
+    # Load original full-resolution image
     img = Image.open(left_path)
     img_w, img_h = img.size
 
+    # -----------------------------------------------------
+    # SCALE IMAGE DOWN ONLY FOR DISPLAY
+    # (clicks get re-scaled back to original resolution)
+    # -----------------------------------------------------
     MAX_WIDTH = 900
+
     if img_w > MAX_WIDTH:
         scale_factor = MAX_WIDTH / img_w
         disp_w = MAX_WIDTH
@@ -208,185 +186,255 @@ with tab_stereo:
     img_display = img.resize((disp_w, disp_h))
 
     st.write(
-        "Click **three points** on one object: corner + two edges.\n"
-        "Shorter edge = width, longer edge = height."
+        "### Click **three points** on the object:\n"
+        "- Point 1: common corner\n"
+        "- Point 2 & Point 3: other two corners along edges\n"
+        "The shorter distance from Point 1 is reported as *width*, the longer as *height*."
     )
 
+    # Add padding to avoid cropping
     EXTRA_PAD = int(0.15 * disp_h)
-
-    # Convert image to data URL for Canvas (fixes Render crash)
-    img_display_url = pil_to_data_url(img_display)
 
     canvas = st_canvas(
         stroke_width=5,
         stroke_color="#ff0000",
-        background_image=None,
-        background_image_url=img_display_url,     # FIXED
+        background_image=img_display,
         height=disp_h + EXTRA_PAD,
         width=disp_w,
         drawing_mode="point",
         key="canvas_measure",
     )
 
-    # calibration
+    # 2D calibration: pixel length that corresponds to 40 cm in your setup
+    # From your example: P1=(1641,1242), P2=(1761,3365)
     REF_P1 = (1641, 1242)
     REF_P2 = (1761, 3365)
     REF_LEN_PX = math.hypot(REF_P2[0] - REF_P1[0], REF_P2[1] - REF_P1[1])
-    CM_PER_PIXEL = 40.0 / REF_LEN_PX
+    CM_PER_PIXEL = 40.0 / REF_LEN_PX  # ≈ 0.01881 cm/px
 
     def to_original_coords(obj):
+        """Convert a Fabric.js point object to original image coords."""
         x_s = int(obj["left"])
         y_s = int(obj["top"])
-        return (x_s, y_s), (int(x_s / scale_factor), int(y_s / scale_factor))
+        x = int(x_s / scale_factor)
+        y = int(y_s / scale_factor)
+        return (x_s, y_s), (x, y)
 
     if canvas.json_data:
         objs = canvas.json_data.get("objects", [])
 
         if len(objs) == 1:
-            st.info("Click two more points.")
+            st.info("Click two more points to measure width and height.")
         elif len(objs) == 2:
-            st.info("Click one more point.")
+            st.info("Click one more point (total 3) so we can compute width and height.")
 
         if len(objs) >= 2:
+            # ---- Point 1 and Point 2 ----
             p1_s, p1 = to_original_coords(objs[0])
             p2_s, p2 = to_original_coords(objs[1])
 
+            # distance P1-P2, used if only two points
             dx12 = p2[0] - p1[0]
             dy12 = p2[1] - p1[1]
-            pix12 = math.hypot(dx12, dy12)
-            len12 = pix12 * CM_PER_PIXEL
+            pix_12 = math.hypot(dx12, dy12)
+            len12_cm = pix_12 * CM_PER_PIXEL
 
             if len(objs) == 2:
-                st.success(f"Edge (P1–P2): {len12:.2f} cm")
+                st.success(f"Single edge length (P1–P2): **{len12_cm:.2f} cm**")
 
+        # If we have 3 or more points, use P1 as common corner and P2, P3 as edges
         if len(objs) >= 3:
             p3_s, p3 = to_original_coords(objs[2])
+            st.write("Point 3 (display):", p3_s, "  (original):", p3)
 
+            # distance P1-P3
             dx13 = p3[0] - p1[0]
             dy13 = p3[1] - p1[1]
-            pix13 = math.hypot(dx13, dy13)
-            len13 = pix13 * CM_PER_PIXEL
+            pix_13 = math.hypot(dx13, dy13)
+            len13_cm = pix_13 * CM_PER_PIXEL
 
-            width = min(len12, len13)
-            height = max(len12, len13)
+            st.write(f"Edge from P1–P2: {len12_cm:.2f} cm")
+            st.write(f"Edge from P1–P3: {len13_cm:.2f} cm")
+
+            # decide which is width vs height
+            if len12_cm <= len13_cm:
+                width_cm = len12_cm
+                height_cm = len13_cm
+            else:
+                width_cm = len13_cm
+                height_cm = len12_cm
 
             st.success(
-                f"**Width:** {width:.2f} cm\n\n"
-                f"**Height:** {height:.2f} cm"
+                f"Estimated dimensions:\n\n"
+                f"- **Width** (shorter): {width_cm:.2f} cm\n"
+                f"- **Height** (longer): {height_cm:.2f} cm"
             )
 
-
 # ============================================================
-# TAB 2 — POSE + HAND TRACKING
+# TAB 2 – POSE + HAND TRACKING WITH CSV LOGGING + FRAME GALLERY
 # ============================================================
 with tab_pose:
-    st.title("Pose & Hand Tracking (MediaPipe)")
 
-    if "pose_log" not in st.session_state:
-        st.session_state.pose_log = []
-    if "frame_counter" not in st.session_state:
-        st.session_state.frame_counter = 0
-    if "preview_frames" not in st.session_state:
-        st.session_state.preview_frames = []
+    st.title("Real-Time Pose and Hand Tracking (MediaPipe)")
 
-    st.write(
-        "**Upload a short video or use webcam.**\n"
-        "For deployment stability: max **300 processed frames**."
+    # Initialize state
+    if "pose_hand_log" not in st.session_state:
+        st.session_state.pose_hand_log = []
+    if "pose_frame_counter" not in st.session_state:
+        st.session_state.pose_frame_counter = 0
+    if "gallery_frames" not in st.session_state:
+        st.session_state.gallery_frames = []   # store sampled frames for display
+
+    st.markdown(
+        """
+This tab performs **pose estimation + hand tracking** using MediaPipe.
+Landmarks are saved into a CSV file.
+
+### CSV Columns:
+- `timestamp` — UTC time  
+- `frame_index` — sequential global frame number  
+- `track` — pose / left_hand / right_hand  
+- `landmark_index` — index of the point  
+- `x, y, z` — normalized coordinates  
+- `visibility` — pose confidence (hands = 1.0)
+        """
     )
 
     mode = st.radio(
-        "Select mode",
-        ["Webcam snapshot", "Upload video"],
+        "Input mode",
+        ["Webcam snapshot (browser)", "Upload video file"],
         horizontal=True,
     )
 
-    # -------------------------------------------------------
-    # MODE 1 — WEBCAM
-    # -------------------------------------------------------
-    if mode == "Webcam snapshot":
-        cam = st.camera_input("Capture frame")
+    # ============================================================
+    # MODE A — WEBCAM SNAPSHOT
+    # ============================================================
+    if mode == "Webcam snapshot (browser)":
+        st.info("Capture a webcam frame. It will be logged and displayed.")
 
-        if cam:
-            data = np.asarray(bytearray(cam.getvalue()), dtype=np.uint8)
-            frame = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        cam_img = st.camera_input("Take a snapshot")
 
-            st.session_state.frame_counter += 1
-            idx = st.session_state.frame_counter
+        if cam_img is not None:
+            file_bytes = np.asarray(bytearray(cam_img.getvalue()), dtype=np.uint8)
+            frame_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-            annotated, rows = analyze_frame_pose_and_hands(frame, idx)
-            st.session_state.pose_log.extend(rows)
+            st.session_state.pose_frame_counter += 1
+            frame_idx = st.session_state.pose_frame_counter
 
-            safe_display_image(annotated, f"Webcam frame #{idx}")
+            annotated_bgr, rows = analyze_frame_pose_and_hands(frame_bgr, frame_idx)
+            st.session_state.pose_hand_log.extend(rows)
 
-    # -------------------------------------------------------
-    # MODE 2 — VIDEO
-    # -------------------------------------------------------
+            # resize & show
+            annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+            max_w = 900
+            h, w = annotated_rgb.shape[:2]
+            if w > max_w:
+                scale = max_w / w
+                annotated_rgb = cv2.resize(
+                    annotated_rgb, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
+                )
+
+            st.image(annotated_rgb, caption=f"Webcam Frame #{frame_idx}")
+
+    # ============================================================
+    # MODE B — VIDEO UPLOAD
+    # ============================================================
     else:
+        st.info("Upload a short video. Frames will be processed and sampled every 10 frames.")
+
         video_file = st.file_uploader(
-            "Upload video", type=["mp4", "mov", "avi", "mkv"]
+            "Upload a video file (MP4 recommended)",
+            type=["mp4", "mov", "avi", "mkv"],
         )
 
-        if video_file:
-            tmp = Path(ROOT_DIR) / "tmp_video.mp4"
-            with open(tmp, "wb") as f:
-                f.write(video_file.getbuffer())
+        if video_file is not None:
+
+            tmp_path = Path(OUTPUT_DIR) / "uploaded_pose_video.mp4"
+            with open(tmp_path, "wb") as f:
+                f.write(video_file.read())
 
             if st.button("Process uploaded video"):
-                cap = cv2.VideoCapture(str(tmp))
-                total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+                cap = cv2.VideoCapture(str(tmp_path))
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+
                 frame_idx = 0
                 progress = st.progress(0.0)
-                last_annot = None
+                st.session_state.gallery_frames = []  # reset gallery
+
+                last_annotated = None
 
                 while True:
-                    ret, frame = cap.read()
+                    ret, frame_bgr = cap.read()
                     if not ret:
                         break
+
                     frame_idx += 1
+                    st.session_state.pose_frame_counter += 1
+                    global_idx = st.session_state.pose_frame_counter
 
-                    # PROCESS EVERY 2nd FRAME
-                    if frame_idx % 2 != 0:
-                        continue
+                    annotated_bgr, rows = analyze_frame_pose_and_hands(frame_bgr, global_idx)
+                    st.session_state.pose_hand_log.extend(rows)
+                    last_annotated = annotated_bgr
 
-                    if frame_idx > 600:  # protects Render free plan
-                        break
+                    # =====================================================
+                    # NEW: Save every 10th frame to gallery
+                    # =====================================================
+                    if frame_idx % 10 == 0:
+                        rgb_small = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+                        h, w = rgb_small.shape[:2]
+                        scale = 300 / max(h, w)
+                        rgb_small = cv2.resize(
+                            rgb_small,
+                            (int(w * scale), int(h * scale)),
+                            interpolation=cv2.INTER_AREA,
+                        )
+                        st.session_state.gallery_frames.append(rgb_small)
 
-                    st.session_state.frame_counter += 1
-                    idx = st.session_state.frame_counter
+                        # limit gallery size
+                        if len(st.session_state.gallery_frames) > 50:
+                            st.session_state.gallery_frames.pop(0)
 
-                    annotated, rows = analyze_frame_pose_and_hands(frame, idx)
-                    st.session_state.pose_log.extend(rows)
-                    last_annot = annotated
-
-                    # sample preview
-                    if (frame_idx // 2) % 10 == 0:
-                        rgb_small = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-                        st.session_state.preview_frames.append(rgb_small)
-                        if len(st.session_state.preview_frames) > 30:
-                            st.session_state.preview_frames.pop(0)
-
-                    progress.progress(min(frame_idx / total, 1.0))
+                    # update progress
+                    if frame_idx % 5 == 0:
+                        progress.progress(min(frame_idx / total_frames, 1.0))
 
                 cap.release()
+                progress.progress(1.0)
                 st.success(f"Processed {frame_idx} frames.")
 
-                if last_annot is not None:
-                    safe_display_image(last_annot, "Last processed frame")
+                # -------------------------------------------------------
+                # Display last annotated frame
+                # -------------------------------------------------------
+                if last_annotated is not None:
+                    rgb = cv2.cvtColor(last_annotated, cv2.COLOR_BGR2RGB)
+                    h, w = rgb.shape[:2]
+                    max_w = 900
+                    if w > max_w:
+                        scale = max_w / w
+                        rgb = cv2.resize(
+                            rgb, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
+                        )
+                    st.image(rgb, caption="Last Annotated Frame")
 
-                if st.session_state.preview_frames:
-                    st.write("### Playback (every 10th processed frame)")
+                # -------------------------------------------------------
+                # DISPLAY FRAME GALLERY (step size = 10)
+                # -------------------------------------------------------
+                if st.session_state.gallery_frames:
+                    st.markdown("### Frame Gallery (Every 10th Frame)")
                     cols = st.columns(3)
-                    for i, fr in enumerate(st.session_state.preview_frames):
+
+                    for i, frame_rgb in enumerate(st.session_state.gallery_frames):
                         with cols[i % 3]:
-                            st.image(fr, width=250)
+                            st.image(frame_rgb, caption=f"Frame {i * 10}", width=250)
 
-    # -------------------------------------------------------
-    # CSV OUTPUT
-    # -------------------------------------------------------
-    st.subheader("Pose / Hand Tracking Log")
+    # ============================================================
+    # CSV LOG VIEWER
+    # ============================================================
+    st.markdown("---")
+    st.markdown("### Pose + Hand Landmark CSV Log")
 
-    if st.session_state.pose_log:
-        df = pd.DataFrame(st.session_state.pose_log)
+    if st.session_state.pose_hand_log:
+        df = pd.DataFrame(st.session_state.pose_hand_log)
         st.dataframe(df.head(100))
 
         csv_path = os.path.join(OUTPUT_DIR, "pose_hand_tracks.csv")
@@ -394,16 +442,17 @@ with tab_pose:
 
         with open(csv_path, "rb") as f:
             st.download_button(
-                "Download CSV",
+                "Download pose_hand_tracks.csv",
                 f,
-                "pose_hand_tracks.csv",
+                file_name="pose_hand_tracks.csv",
                 mime="text/csv",
             )
 
-        if st.button("Clear log"):
-            st.session_state.pose_log = []
-            st.session_state.preview_frames = []
-            st.session_state.frame_counter = 0
+        if st.button("Clear Log"):
+            st.session_state.pose_hand_log = []
+            st.session_state.pose_frame_counter = 0
+            st.session_state.gallery_frames = []
             st.experimental_rerun()
+
     else:
-        st.info("No pose/hand data logged yet.")
+        st.info("No pose/hand data yet. Capture webcam frames or process a video.")
