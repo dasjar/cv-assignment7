@@ -290,189 +290,244 @@ def safe_display_image(bgr_img, caption=""):
 
 
 # ============================================================
-# TAB 2 – POSE + HAND TRACKING WITH CSV LOGGING + FRAME GALLERY
+# TAB 2 – POSE + HAND TRACKING (CLOUD-SAFE VERSION)
 # ============================================================
 with tab_pose:
-    st.title("Real-Time Pose and Hand Tracking (MediaPipe)")
+    st.title("Pose & Hand Tracking (MediaPipe) – Cloud Optimized")
 
-    # ---- Limits to keep cloud hosting stable ----
-    MAX_PROCESSED_FRAMES = 300      # hard cap on how many frames we run MediaPipe on
-    FRAME_STEP = 2                  # process every 2nd frame in the video
-    MAX_PREVIEW_FRAMES = 30         # at most 30 thumbnails stored in memory
+    st.markdown(
+        """
+This cloud-optimized version prevents app crashes on Render by:
 
-    # ---- Session state for logs ----
+- Processing **at most 150 frames**  
+- Running MediaPipe on **every 3rd frame**  
+- Downscaling frames internally  
+- Storing up to **30 preview frames**  
+- Reusing MediaPipe models (no reloading per frame)
+
+Locally (on the cluster), the full version runs without limits.
+        """
+    )
+
+    # Limits for Render stability
+    MAX_FRAMES = 150
+    FRAME_STEP = 3
+    MAX_GALLERY = 30
+
+    # ----------------------------
+    # Session State Initialization
+    # ----------------------------
     if "pose_hand_log" not in st.session_state:
         st.session_state.pose_hand_log = []
     if "pose_frame_counter" not in st.session_state:
         st.session_state.pose_frame_counter = 0
     if "pose_preview_frames" not in st.session_state:
-        st.session_state.pose_preview_frames = []   # sampled annotated frames
+        st.session_state.pose_preview_frames = []
 
-    st.markdown(
-        """
-This tab performs **pose estimation** + **hand tracking** using MediaPipe.
-All detected landmarks are logged to a CSV file.
+    # ----------------------------
+    # MediaPipe Model (cached)
+    # ----------------------------
+    @st.cache_resource
+    def load_mp_models():
+        pose = mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=1,
+            enable_segmentation=False,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        hands = mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=2,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        return pose, hands
 
-To make the deployed app stable on a small cloud instance, we:
+    pose_model, hands_model = load_mp_models()
 
-- Process at most **300 frames** per uploaded video  
-- Run MediaPipe on **every 2nd frame**  
-- Store at most **30 preview frames** for the gallery  
+    # ----------------------------
+    # Helper: Run MP on a frame
+    # ----------------------------
+    def run_mp(frame_bgr, frame_idx):
+        """Downscale + run pose + hand tracking."""
+        h, w = frame_bgr.shape[:2]
 
-Locally (on the cluster) you can process full videos without these limits.
-        """
-    )
+        # downscale for cloud
+        MAX_W = 640
+        if w > MAX_W:
+            scale = MAX_W / w
+            frame_bgr = cv2.resize(
+                frame_bgr,
+                (int(w * scale), int(h * scale)),
+                interpolation=cv2.INTER_AREA,
+            )
 
+        ts = datetime.utcnow().isoformat()
+        rows = []
+
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        pose_res = pose_model.process(rgb)
+        hand_res = hands_model.process(rgb)
+
+        annotated = frame_bgr.copy()
+
+        # Pose
+        if pose_res.pose_landmarks:
+            mp_drawing.draw_landmarks(
+                annotated,
+                pose_res.pose_landmarks,
+                mp_pose.POSE_CONNECTIONS,
+            )
+            for i, lm in enumerate(pose_res.pose_landmarks.landmark):
+                rows.append({
+                    "timestamp": ts,
+                    "frame_index": frame_idx,
+                    "track": "pose",
+                    "landmark_index": i,
+                    "x": lm.x, "y": lm.y, "z": lm.z,
+                    "visibility": lm.visibility,
+                })
+
+        # Hands
+        if hand_res.multi_hand_landmarks:
+            for hand_lm, handedness in zip(
+                hand_res.multi_hand_landmarks,
+                hand_res.multi_handedness,
+            ):
+                label = handedness.classification[0].label.lower()
+                track_name = f"{label}_hand"
+
+                mp_drawing.draw_landmarks(
+                    annotated, hand_lm, mp_hands.HAND_CONNECTIONS
+                )
+
+                for i, lm in enumerate(hand_lm.landmark):
+                    rows.append({
+                        "timestamp": ts,
+                        "frame_index": frame_idx,
+                        "track": track_name,
+                        "landmark_index": i,
+                        "x": lm.x, "y": lm.y, "z": lm.z,
+                        "visibility": 1.0,
+                    })
+
+        return annotated, rows
+
+    # ----------------------------
+    # UI – Select input mode
+    # ----------------------------
     mode = st.radio(
         "Select input mode:",
-        ["Webcam snapshot (browser)", "Upload video file"],
+        ["Webcam snapshot", "Upload video file"],
         horizontal=True
     )
 
-    # ----------------------------------------------------------
-    # MODE 1 — Webcam snapshot
-    # ----------------------------------------------------------
-    if mode == "Webcam snapshot (browser)":
-        st.info("Capture webcam snapshots. Each frame is processed and logged.")
-
-        cam_image = st.camera_input("Capture a frame")
-
-        if cam_image is not None:
-            file_bytes = np.asarray(bytearray(cam_image.getvalue()), dtype=np.uint8)
-            frame_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    # ----------------------------
+    # MODE 1 – Webcam
+    # ----------------------------
+    if mode == "Webcam snapshot":
+        img = st.camera_input("Capture a frame")
+        if img:
+            arr = np.frombuffer(img.getvalue(), np.uint8)
+            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
             st.session_state.pose_frame_counter += 1
-            frame_idx = st.session_state.pose_frame_counter
+            idx = st.session_state.pose_frame_counter
 
-            annotated_bgr, rows = analyze_frame_pose_and_hands(frame_bgr, frame_idx)
+            annotated, rows = run_mp(frame, idx)
             st.session_state.pose_hand_log.extend(rows)
 
-            safe_display_image(annotated_bgr, f"Annotated webcam frame #{frame_idx}")
+            safe_display_image(annotated, f"Webcam Frame #{idx}")
 
-    # ----------------------------------------------------------
-    # MODE 2 — Upload video
-    # ----------------------------------------------------------
+    # ----------------------------
+    # MODE 2 – Video Upload
+    # ----------------------------
     else:
-        st.info(
-            "Upload a short video. We process up to 300 frames "
-            "(every 2nd frame) and log all landmarks."
-        )
+        st.info(f"Processes at most {MAX_FRAMES} frames (every {FRAME_STEP}th frame)")
 
-        video_file = st.file_uploader(
-            "Upload a video file", type=["mp4", "mov", "avi", "mkv"]
-        )
+        video = st.file_uploader("Upload a video", type=["mp4", "mov", "avi", "mkv"])
 
-        if video_file is not None:
-            # optional guard: warn if file is very large
-            if video_file.size > 80 * 1024 * 1024:  # 80 MB
-                st.warning(
-                    "Large video detected (>80 MB). For the online demo, "
-                    "please prefer short clips (5–10 seconds, 720p or lower) "
-                    "to avoid timeouts."
-                )
-
-            tmp_video_path = Path(ROOT_DIR) / "tmp_pose_video.mp4"
-            with open(tmp_video_path, "wb") as f:
-                f.write(video_file.read())
+        if video:
+            temp_path = Path(ROOT_DIR) / "tmp_video.mp4"
+            with open(temp_path, "wb") as f:
+                f.write(video.read())
 
             if st.button("Process uploaded video"):
-                cap = cv2.VideoCapture(str(tmp_video_path))
-                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+                cap = cv2.VideoCapture(str(temp_path))
+                total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
 
-                raw_frame_idx = 0         # counts every frame read from video
-                processed_frames = 0      # counts frames that actually run through MediaPipe
-                progress = st.progress(0.0)
-                last_annotated = None
-                st.session_state.pose_preview_frames = []   # reset gallery
+                raw_idx = 0
+                processed = 0
+
+                st.session_state.pose_preview_frames = []
+                prog = st.progress(0.0)
+
+                # approximate loop limit on cloud
+                max_raw = min(total, MAX_FRAMES * FRAME_STEP)
 
                 while True:
-                    ret, frame_bgr = cap.read()
+                    ret, frame = cap.read()
                     if not ret:
                         break
 
-                    raw_frame_idx += 1
+                    raw_idx += 1
+                    prog.progress(raw_idx / max_raw)
 
-                    # Skip frames to reduce load
-                    if raw_frame_idx % FRAME_STEP != 0:
+                    if raw_idx % FRAME_STEP != 0:
                         continue
 
-                    processed_frames += 1
-                    if processed_frames > MAX_PROCESSED_FRAMES:
-                        # stop once we hit our processing cap
+                    processed += 1
+                    if processed > MAX_FRAMES:
                         break
 
                     st.session_state.pose_frame_counter += 1
-                    global_idx = st.session_state.pose_frame_counter
+                    idx = st.session_state.pose_frame_counter
 
-                    # Run MediaPipe pose + hands on this frame
-                    annotated_bgr, rows = analyze_frame_pose_and_hands(
-                        frame_bgr, global_idx
-                    )
+                    annotated, rows = run_mp(frame, idx)
                     st.session_state.pose_hand_log.extend(rows)
-                    last_annotated = annotated_bgr
 
-                    # Sample some frames for gallery (every 10th processed frame)
-                    if (
-                        processed_frames % 10 == 0
-                        and len(st.session_state.pose_preview_frames) < MAX_PREVIEW_FRAMES
-                    ):
-                        rgb_small = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
-                        st.session_state.pose_preview_frames.append(rgb_small)
-
-                    # Update progress based on both total and max frames
-                    frac_total = raw_frame_idx / max(total_frames, 1)
-                    frac_cap = processed_frames / MAX_PROCESSED_FRAMES
-                    progress.progress(min(frac_total, frac_cap, 1.0))
+                    if len(st.session_state.pose_preview_frames) < MAX_GALLERY:
+                        st.session_state.pose_preview_frames.append(
+                            cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+                        )
 
                 cap.release()
-                progress.progress(1.0)
+                prog.progress(1.0)
 
-                st.success(
-                    f"Processed {processed_frames} frames "
-                    f"(out of {total_frames} total video frames)."
-                )
+                st.success(f"Processed {processed} frames!")
 
-                # ---- Show last annotated frame ----
-                if last_annotated is not None:
-                    safe_display_image(
-                        last_annotated,
-                        caption="Annotated last processed frame"
-                    )
+                # show last frame
+                if processed > 0:
+                    safe_display_image(annotated, "Last processed frame")
 
-                # ---- Display gallery of sampled frames ----
+                # gallery
                 if st.session_state.pose_preview_frames:
-                    st.markdown("### Playback Preview (every 10th processed frame)")
+                    st.markdown("### Preview Frames")
                     cols = st.columns(3)
-
-                    for i, frame_rgb in enumerate(st.session_state.pose_preview_frames):
+                    for i, fr in enumerate(st.session_state.pose_preview_frames):
                         with cols[i % 3]:
-                            st.image(frame_rgb, caption=f"Preview #{i+1}", width=250)
+                            st.image(fr, caption=f"Sample #{i+1}", width=250)
 
-    # ----------------------------------------------------------
-    # CSV LOG SECTION
-    # ----------------------------------------------------------
+    # ----------------------------
+    # CSV Logging
+    # ----------------------------
     st.markdown("### Pose + Hand Landmark CSV Log")
 
     if st.session_state.pose_hand_log:
         df = pd.DataFrame(st.session_state.pose_hand_log)
-
         st.dataframe(df.head(100))
 
         csv_path = os.path.join(OUTPUT_DIR, "pose_hand_tracks.csv")
         df.to_csv(csv_path, index=False)
 
         with open(csv_path, "rb") as f:
-            st.download_button(
-                "Download CSV",
-                f,
-                file_name="pose_hand_tracks.csv",
-                mime="text/csv"
-            )
+            st.download_button("Download CSV", f, "pose_hand_tracks.csv")
 
-        if st.button("Clear logged data"):
+        if st.button("Clear log"):
             st.session_state.pose_hand_log = []
             st.session_state.pose_preview_frames = []
             st.session_state.pose_frame_counter = 0
             st.experimental_rerun()
     else:
-        st.info("No pose/hand data logged yet. Capture a frame or process a video.")
+        st.info("No pose/hand data logged yet.")
